@@ -21,12 +21,14 @@ class MQTT::Client
   attr_accessor :tls_certfile  # The path to a file containing the client's certificate
   attr_accessor :tls_keyfile   # The path to a file containing the client's private key
 
+  attr_accessor :crashed # Mark the client hash a crash.
+
   # OLD deprecated clean_start
   alias :clean_start :clean_session
   alias :clean_start= :clean_session=
 
-  # Timeout between select polls (in seconds)
-  SELECT_TIMEOUT = 0.5
+    # Timeout between select polls (in seconds)
+    SELECT_TIMEOUT = 2
 
   # Default attribute values
   ATTR_DEFAULTS = {
@@ -86,7 +88,7 @@ class MQTT::Client
   # - a URI that uses the MQTT scheme
   # - a hostname and port
   # - a Hash containing attributes to be set on the new instance
-  # 
+  #
   # If no arguments are given then the method will look for a URI
   # in the MQTT_BROKER environment variable.
   #
@@ -108,14 +110,14 @@ class MQTT::Client
       end
     elsif args.length == 1
       case args[0]
-        when Hash
-          args = args[0]
-        when URI
-          args = parse_uri(args[0])
-        when %r|^mqtts?://|
-          args = parse_uri(args[0])
-        else
-          args = {:remote_host => args[0]}
+      when Hash
+        args = args[0]
+      when URI
+        args = parse_uri(args[0])
+      when %r|^mqtts?://|
+        args = parse_uri(args[0])
+      else
+        args = {:remote_host => args[0]}
       end
     elsif args.length == 1
       args = {:remote_host => args[0]}
@@ -162,7 +164,7 @@ class MQTT::Client
     end
 
     if not connected?
-      # Create network socket
+
       tcp_socket = TCPSocket.new(@remote_host,@remote_port)
 
       if @tls_certfile.nil? || @tls_keyfile.nil?
@@ -203,10 +205,18 @@ class MQTT::Client
       # Receive response
       receive_connack
 
+      crashed = false
+
       # Start packet reading thread
       @read_thread = Thread.new(Thread.current) do |parent|
         Thread.current[:parent] = parent
-        loop { receive_packet }
+        loop {
+
+          read_failed = receive_packet
+          break if read_failed
+
+
+        }
       end
     end
 
@@ -217,13 +227,21 @@ class MQTT::Client
     end
   end
 
+
   # Disconnect from the MQTT broker.
   # If you don't want to say goodbye to the broker, set send_msg to false.
   def disconnect(send_msg=true)
     if connected?
       if send_msg
         packet = MQTT::Packet::Disconnect.new
-        send_packet(packet)
+
+        begin
+          send_packet(packet)
+        rescue Exception => e
+          $stderr.puts "Disconnect the server error:#{e.message}"
+          crashed = true
+        end
+
       end
       @socket.close unless @socket.nil?
       @socket = nil
@@ -234,7 +252,7 @@ class MQTT::Client
 
   # Checks whether the client is connected to the broker.
   def connected?
-    not @socket.nil?
+    not (crashed or @socket.nil? or @socket.closed?)
   end
 
   # Send a MQTT ping message to indicate that the MQTT client is alive.
@@ -357,14 +375,16 @@ class MQTT::Client
     send_packet(packet)
   end
 
-private
+  private
 
   # Try to read a packet from the broker
   # Also sends keep-alive ping packets.
   def receive_packet
+    
     begin
       # Poll socket - is there data waiting?
       result = IO.select([@socket], nil, nil, SELECT_TIMEOUT)
+
       unless result.nil?
         # Yes - read in the packet
         packet = MQTT::Packet.read(@socket)
@@ -376,6 +396,8 @@ private
           nil
           # FIXME: implement responses for QOS 1 and 2
         end
+
+        
       end
 
       # Time to send a keep-alive ping request?
@@ -385,14 +407,18 @@ private
 
       # FIXME: check we received a ping response recently?
 
-    # Pass exceptions up to parent thread
+      # Pass exceptions up to parent thread
+      
     rescue Exception => exp
       unless @socket.nil?
         @socket.close
         @socket = nil
       end
-      Thread.current[:parent].raise(exp)
+      crashed = true
+      raise(exp)
+
     end
+    
   end
 
   # Read and check a connection acknowledgement packet
@@ -419,13 +445,14 @@ private
     @write_semaphore.synchronize do
       @socket.write(data.to_s)
     end
+
   end
-  
+
   private
   def parse_uri(uri)
     uri = URI.parse(uri) unless uri.is_a?(URI)
     raise "Only the mqtt:// scheme is supported" unless uri.scheme == 'mqtt'
-  
+
     {
       :remote_host => uri.host,
       :remote_port => uri.port || 1883,
