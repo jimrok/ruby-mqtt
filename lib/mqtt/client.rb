@@ -238,7 +238,7 @@ class MQTT::Client
         begin
           send_packet(packet)
         rescue Exception => e
-          $stderr.puts "Disconnect the server error:#{e.message}"
+          Rails.logger.error "#{@client_id}:disconnect the server error:#{e.message},set crashed"
           crashed = true
         end
 
@@ -414,6 +414,8 @@ class MQTT::Client
         @socket.close
         @socket = nil
       end
+
+      Rails.logger.error "#{@client_id}:disconnect the server error:#{e.message},set crashed"
       crashed = true
       raise(exp)
 
